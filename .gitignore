@@ -1,0 +1,18 @@
+# 빌드 산출물
+.build/
+build/
+.swiftpm/
+*.xcodeproj/
+xcuserdata/
+DerivedData/
+
+# 외부 소스·툴체인 (./build.sh 가 vendor/ghostty 를 받아 빌드, vendor/zig 는 직접 받음)
+vendor/
+
+# 로컬 전용
+CLAUDE.md
+.claude/
+.DS_Store
+*.swp
+*.log
+AGENTS.md
