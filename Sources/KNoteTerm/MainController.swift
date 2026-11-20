@@ -360,7 +360,7 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
         sidebar = Sidebar(folders: [notesDir] + state.extraFolders.map { URL(fileURLWithPath: $0) })
         super.init()
         buildUI()
-        sidebar.onOpen = { [weak self] in self?.open($0, preview: true) }
+        sidebar.onOpen = { [weak self] in self?.open($0) }
         sidebar.onWillTrash = { [weak self] urls in self?.closeTabs(under: urls) }
         sidebar.onRenamed = { [weak self] in self?.renamed($0, $1) }
         sidebar.onChangeRoot = { [weak self] in self?.changeNotesDir() }
@@ -455,6 +455,8 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
 
     func persist() {
         docs.forEach { $0.save() }
+        // 집중 모드 중 종료해도 다음 실행은 켜기 전 레이아웃으로
+        if let f = focusMode { state.sidebar = f.sidebar; state.editorHidden = !f.editor }
         state.tabs = docs.map(\.url.path)
         state.selected = cur
         if pendingSplit == nil {
@@ -593,10 +595,13 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
         let content = DropView(), line = hairline()
         content.onDrop = { [weak self] in self?.importExternal($0) }
         for v in [header, line, rightSplit] { v.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(v) }
+        chrome = [header, line]
+        chromeTop = rightSplit.topAnchor.constraint(equalTo: line.bottomAnchor)
+        bareTop = rightSplit.topAnchor.constraint(equalTo: content.topAnchor)
         NSLayoutConstraint.activate([
             header.topAnchor.constraint(equalTo: content.topAnchor),
             line.topAnchor.constraint(equalTo: header.bottomAnchor),
-            rightSplit.topAnchor.constraint(equalTo: line.bottomAnchor),
+            chromeTop,
             rightSplit.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ] + [header, line, rightSplit].flatMap { [
             $0.leadingAnchor.constraint(equalTo: content.leadingAnchor),
@@ -701,17 +706,15 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
 
     // MARK: 메모 탭
 
-    /// preview: 탐색기에서 연 마크다운은 미리보기로 시작 (이미 열린 탭은 그대로)
+    /// 기본은 항상 편집기. preview 는 미리보기 안의 링크로 연 문서만 (미리보기 상태는 저장하지 않음)
     func open(_ url: URL, select sel: Bool = true, preview: Bool = false) {
         if let i = docs.firstIndex(where: { $0.url.standardizedFileURL == url.standardizedFileURL }) {
             if sel { select(i) }
             return
         }
+        // 텍스트·PDF·이미지가 아니면 (pptx 등) Finder 처럼 기본 앱으로
         guard let d = Doc(url: url, syntax: Syntax.named(state.syntax[url.path])) else {
-            let a = NSAlert()
-            a.messageText = "열 수 없는 파일입니다 (텍스트 · PDF · 이미지만 지원)"
-            a.informativeText = url.path
-            a.runModal()
+            if sel, !isSelfTest { NSWorkspace.shared.open(url) }
             return
         }
         d.preview = preview && d.canPreview
@@ -1195,6 +1198,42 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
 
     /// 메모 영역에서 실제로 보이는 뷰 (텍스트 / PDF / 이미지)
     private var editorFocusTarget: NSView { doc == nil ? emptyView : pane.focusTarget }
+
+    // MARK: 집중 모드 (⌘⇧F) — 전체 화면 + 상단 헤더 숨김. 터미널에 포커스가 있으면 터미널만 남김
+
+    private var chrome: [NSView] = []
+    private var chromeTop: NSLayoutConstraint!, bareTop: NSLayoutConstraint!
+    /// 켜기 전 상태 (끌 때 복원)
+    private var focusMode: (sidebar: Bool, editor: Bool, terminalOnly: Bool, wasFull: Bool)?
+    var focusModeOn: Bool { focusMode != nil }
+    var headerVisible: Bool { !(chrome.first?.isHidden ?? true) }
+    private var isFullScreen: Bool { window.styleMask.contains(.fullScreen) }
+
+    @objc func toggleFocusMode() {
+        if let f = focusMode {
+            focusMode = nil
+            setChrome(true)
+            if f.editor { setEditor(true) }
+            if f.sidebar { setSidebar(true) }
+            if f.terminalOnly { terminal.focus(terminal.activeTerm) }
+            if !f.wasFull, isFullScreen { window.toggleFullScreen(nil) }
+        } else {
+            let termOnly = terminalVisible && terminalFocused
+            focusMode = (sidebarVisible, editorVisible, termOnly, isFullScreen)
+            if termOnly { setSidebar(false); setEditor(false) }
+            setChrome(false)
+            if !isFullScreen, !isSelfTest { window.toggleFullScreen(nil) } // 자가 점검은 화면을 뺏지 않음
+        }
+    }
+
+    private func setChrome(_ show: Bool) {
+        chrome.forEach { $0.isHidden = !show }
+        bareTop.isActive = !show
+        chromeTop.isActive = show
+    }
+
+    /// 초록 버튼·⌃⌘F 로 전체 화면을 빠져나오면 집중 모드도 끔 (헤더 없이 창 모드가 되지 않게)
+    func windowDidExitFullScreen(_ n: Notification) { if focusMode != nil { toggleFocusMode() } }
 
     @objc func toggleSidebar() { setSidebar(!sidebarVisible) }
     @objc func toggleTerminal() { setTerminal(!terminalVisible) }

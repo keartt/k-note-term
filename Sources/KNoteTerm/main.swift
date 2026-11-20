@@ -108,6 +108,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         send(#selector(MainController.toggleTerminal))
         check(m.editorVisible && !m.terminalVisible, "에디터 숨긴 채 터미널 닫기 → 에디터 다시 보임")
         send(#selector(MainController.toggleTerminal))
+        // ⌘⇧F 집중 모드: 터미널 포커스면 터미널만 + 헤더 숨김, 다시 누르면 원래대로
+        let layoutBefore = (m.sidebarVisible, m.editorVisible)
+        send(#selector(MainController.toggleFocusMode))
+        let fOn = m.focusModeOn && !m.headerVisible && !m.sidebarVisible && !m.editorVisible && m.terminalVisible
+        send(#selector(MainController.toggleFocusMode))
+        check(fOn && !m.focusModeOn && m.headerVisible && (m.sidebarVisible, m.editorVisible) == layoutBefore && m.terminalFocused,
+              "⌘⇧F 집중 모드 (터미널만 · 헤더 숨김 → 복원)")
         let tabsBefore = m.terminal.tabCount
         send(#selector(MainController.newTab))
         check(m.terminal.tabCount == tabsBefore + 1, "터미널 포커스에서 ⌘T = 터미널 새 탭")
@@ -144,9 +151,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let ph = m.previewText
         check(m.currentViewer == "preview" && ph.contains("<h1>제목</h1>") && ph.contains("checked") && ph.contains("<table>")
               && ph.contains("<em>기울임</em>") && ph.contains("<strong>굵게</strong>") && ph.contains("<code>a*b*c</code>")
-              && ph.contains("&lt;tag&gt;") && ph.contains("let x = 1 &lt; 2"), "탐색기에서 연 md = 미리보기 렌더")
+              && ph.contains("&lt;tag&gt;") && ph.contains("let x = 1 &lt; 2"), "md 미리보기 렌더")
         send(#selector(MainController.togglePreview))
         check(m.currentViewer == "text", "⌘⇧P 미리보기 → 편집")
+        m.closeCurrent()
+        m.sidebar.onOpen?(mdURL)
+        check(m.currentViewer == "text", "탐색기에서 연 md = 항상 편집기로 시작 (\(m.currentViewer))")
+        m.closeCurrent()
         let crHTML = Markdown.html("a\r\r```\n# dd\n```")
         check(crHTML.contains("<pre>") && !crHTML.contains("<h1>"), "미리보기: 단독 CR 줄바꿈도 코드블록 인식")
 
@@ -322,6 +333,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         m.sidebar.focus() // 편집 종료 → 이름 변경
         check(FileManager.default.fileExists(atPath: ux.appendingPathComponent("이름바꿈.md").path)
               && !FileManager.default.fileExists(atPath: ux.appendingPathComponent("새 메모.md").path), "탐색기 새 메모 + 이름 변경")
+        // 탐색기 ⌘C / ⌘V 파일 복사 → ⌘Z 되돌리기, 드래그 이동 → ⌘Z 되돌리기
+        let fm = FileManager.default
+        m.sidebar.reveal(deep)
+        m.sidebar.copySelectedFiles()
+        m.sidebar.reveal(ux.appendingPathComponent("이름바꿈.md"))
+        m.sidebar.pasteFiles()
+        let copied = ux.appendingPathComponent("깊은파일.txt")
+        let pasteOK = fm.fileExists(atPath: copied.path) && m.sidebar.selectedURL?.standardizedFileURL == copied.standardizedFileURL
+        m.sidebar.reveal(deep.deletingLastPathComponent())
+        m.sidebar.pasteFiles()
+        let dup = fm.fileExists(atPath: deep.deletingLastPathComponent().appendingPathComponent("깊은파일 2.txt").path)
+        m.sidebar.undoFileOp(); m.sidebar.undoFileOp()
+        check(pasteOK && dup && !fm.fileExists(atPath: copied.path) && fm.fileExists(atPath: deep.path), "탐색기 ⌘C/⌘V 파일 붙여넣기 (같은 이름은 \"이름 2\") + ⌘Z")
+        m.open(deep)
+        m.sidebar.transfer([deep], to: ux, move: true)
+        let moved = fm.fileExists(atPath: copied.path) && !fm.fileExists(atPath: deep.path) && m.currentURL?.standardizedFileURL == copied.standardizedFileURL
+        m.sidebar.transfer([deep.deletingLastPathComponent()], to: deep.deletingLastPathComponent(), move: true) // 자기 안으로 = 무시
+        m.sidebar.undoFileOp()
+        check(moved && fm.fileExists(atPath: deep.path) && m.currentURL?.standardizedFileURL == deep.standardizedFileURL, "탐색기 드래그 이동 → 열린 탭 경로 따라감 + ⌘Z")
         m.sidebar.onOpenTerminal?(ux)
         if let t = m.terminal.activeTerm {
             let pDeadline = Date().addingTimeInterval(6)
@@ -506,6 +536,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("마크다운 미리보기", #selector(MainController.togglePreview), "p", [.command, .shift]),
             item("에디터 분할 / 합치기", #selector(MainController.toggleEditorSplit), "\\"),
             item("에디터 분할 방향 바꾸기", #selector(MainController.rotateEditorSplit), "\\", [.command, .option]),
+            item("집중 모드 (전체 화면 · 헤더 숨김)", #selector(MainController.toggleFocusMode), "f", [.command, .shift]),
             .separator(),
             item("글자 크게", #selector(MainController.fontBigger), "="),
             item("글자 작게", #selector(MainController.fontSmaller), "-"),

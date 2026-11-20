@@ -86,6 +86,8 @@ final class FileOutline: NSOutlineView {
     var onReturn: (() -> Void)?
     var onCopyPath: (() -> Void)?
     var onOpenSelected: (() -> Void)?
+    var onCopyFiles: (() -> Void)?
+    var onPasteFiles: (() -> Void)?
     let fileUndo = UndoManager()
     override var undoManager: UndoManager? { fileUndo }
 
@@ -126,10 +128,15 @@ final class FileOutline: NSOutlineView {
     // 메뉴의 실행 취소/복귀(nil-target)가 첫 응답자인 트리에 먼저 도달
     @objc func undo(_ sender: Any?) { fileUndo.undo() }
     @objc func redo(_ sender: Any?) { fileUndo.redo() }
+    // ⌘C / ⌘V = 파일 복사 / 붙여넣기 (Finder 와 같은 파일 클립보드)
+    @objc func copy(_ sender: Any?) { onCopyFiles?() }
+    @objc func paste(_ sender: Any?) { onPasteFiles?() }
     @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(undo(_:)): return fileUndo.canUndo
         case #selector(redo(_:)): return fileUndo.canRedo
+        case #selector(copy(_:)): return !selectedRowIndexes.isEmpty
+        case #selector(paste(_:)): return !Sidebar.fileURLs(NSPasteboard.general).isEmpty
         default: return true
         }
     }
@@ -193,11 +200,14 @@ final class Sidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate, NST
         outline.onReturn = { [weak self] in self?.renameSelected() }
         outline.onCopyPath = { [weak self] in self?.copySelectedPaths() }
         outline.onOpenSelected = { [weak self] in self?.openSelected() }
+        outline.onCopyFiles = { [weak self] in self?.copySelectedFiles() }
+        outline.onPasteFiles = { [weak self] in self?.pasteFiles() }
         outline.menu = NSMenu()
         outline.menu?.delegate = self
 
         outline.setDraggingSourceOperationMask(.copy, forLocal: false)
-        outline.setDraggingSourceOperationMask(.copy, forLocal: true)
+        outline.setDraggingSourceOperationMask([.copy, .move], forLocal: true) // 트리 안 드래그 = 이동, ⌥ = 복사
+        outline.registerForDraggedTypes([.fileURL])
         let scroll = NSScrollView()
         scroll.documentView = outline
         scroll.hasVerticalScroller = true
@@ -297,18 +307,29 @@ final class Sidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate, NST
             add("휴지통으로 이동", #selector(menuTrash))
             menu.addItem(.separator())
         }
+        add("붙여넣기", #selector(menuPaste))
+        menu.items.last?.isEnabled = !Sidebar.fileURLs(NSPasteboard.general).isEmpty
+        menu.autoenablesItems = false
         add("Finder 에서 보기", #selector(menuReveal))
         menu.addItem(withTitle: "경로 복사", action: #selector(menuCopyPath), keyEquivalent: "c").target = self
         menu.items.last?.keyEquivalentModifierMask = .option
         add("터미널에서 열기", #selector(menuTerminal))
     }
 
+    @objc private func menuPaste() { transfer(Sidebar.fileURLs(NSPasteboard.general), to: targetDir(clickedNode()), move: false) }
     @objc private func menuNewFile() { create(in: targetDir(clickedNode()), folder: false) }
     @objc private func menuNewFolder() { create(in: targetDir(clickedNode()), folder: true) }
     @objc private func menuRename() { clickedNode().map(beginRename) }
-    @objc private func menuTrash() { clickedNode().map { trash([$0.url]) } }
+    @objc private func menuTrash() { trash(clickedURLs()) }
     @objc private func menuReveal() { NSWorkspace.shared.activateFileViewerSelecting([clickedNode()?.url ?? roots[sel].url]) }
-    @objc private func menuCopyPath() { copyPaths([clickedNode()?.url ?? roots[sel].url]) }
+    @objc private func menuCopyPath() { let u = clickedURLs(); copyPaths(u.isEmpty ? [roots[sel].url] : u) }
+
+    /// 우클릭한 항목이 선택 안에 있으면 선택 전체 (Finder 와 같음), 아니면 그 항목만
+    private func clickedURLs() -> [URL] {
+        let r = outline.clickedRow
+        guard r >= 0 else { return [] }
+        return outline.selectedRowIndexes.contains(r) ? selectedURLs : clickedNode().map { [$0.url] } ?? []
+    }
 
     /// 선택한 항목들의 절대경로 (여러 개면 줄바꿈). 선택이 없으면 현재 폴더 탭
     func copySelectedPaths() {
@@ -327,8 +348,7 @@ final class Sidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate, NST
     /// 새 메모(.md) 또는 새 폴더를 만들고 바로 이름 변경 상태로
     func create(in dir: URL, folder: Bool) {
         let base = folder ? "새 폴더" : "새 메모", ext = folder ? "" : ".md"
-        var u = dir.appendingPathComponent(base + ext), i = 2
-        while FileManager.default.fileExists(atPath: u.path) { u = dir.appendingPathComponent("\(base) \(i)\(ext)"); i += 1 }
+        let u = uniqueURL(in: dir, name: base + ext)
         let ok = folder ? (try? FileManager.default.createDirectory(at: u, withIntermediateDirectories: false)) != nil
                         : FileManager.default.createFile(atPath: u.path, contents: Data())
         guard ok else { NSSound.beep(); return }
@@ -434,6 +454,8 @@ final class Sidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate, NST
 
     /// 휴지통으로 이동 (Finder 와 같음, 휴지통에서도 복구 가능). 되돌리기 = 원래 위치로 이동
     private func trash(_ urls: [URL]) {
+        guard !urls.isEmpty else { NSSound.beep(); return }
+        let firstRow = outline.selectedRowIndexes.first
         onWillTrash?(urls)
         var moved: [(from: URL, trash: URL)] = []
         for u in urls {
@@ -444,6 +466,10 @@ final class Sidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate, NST
         outline.fileUndo.registerUndo(withTarget: self) { $0.restore(moved) }
         outline.fileUndo.setActionName("삭제")
         refresh()
+        // 지운 자리 다음 항목 선택 (Finder 와 같음) → 이어서 ⌘⌫ 가능
+        if let r = firstRow, outline.selectedRowIndexes.isEmpty, outline.numberOfRows > 0 {
+            outline.selectRowIndexes([min(r, outline.numberOfRows - 1)], byExtendingSelection: false)
+        }
     }
 
     private func restore(_ moved: [(from: URL, trash: URL)]) {
@@ -455,6 +481,96 @@ final class Sidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate, NST
     }
 
     func undoFileOp() { outline.fileUndo.undo() }
+
+    // MARK: 복사 / 붙여넣기 / 이동
+
+    static func fileURLs(_ pb: NSPasteboard) -> [URL] {
+        pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+    }
+
+    func copySelectedFiles() {
+        let urls = selectedURLs
+        guard !urls.isEmpty else { NSSound.beep(); return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.writeObjects(urls.map { $0 as NSURL })
+    }
+
+    /// 선택한 폴더(파일이면 그 폴더, 선택 없으면 현재 폴더 탭)에 붙여넣기
+    func pasteFiles() {
+        let urls = Sidebar.fileURLs(NSPasteboard.general)
+        guard !urls.isEmpty else { NSSound.beep(); return }
+        transfer(urls, to: targetDir(outline.item(atRow: outline.selectedRow) as? FileNode), move: false)
+    }
+
+    /// 같은 이름이 있으면 "이름 2.확장자", "이름 3.확장자" …
+    private func uniqueURL(in dir: URL, name: String) -> URL {
+        let stem = (name as NSString).deletingPathExtension, ext = (name as NSString).pathExtension
+        var u = dir.appendingPathComponent(name), i = 2
+        while FileManager.default.fileExists(atPath: u.path) {
+            u = dir.appendingPathComponent("\(stem) \(i)" + (ext.isEmpty ? "" : ".\(ext)")); i += 1
+        }
+        return u
+    }
+
+    /// 폴더를 자기 자신이나 그 안으로는 못 옮김/복사함
+    private func isInside(_ dir: URL, _ u: URL) -> Bool {
+        let d = dir.standardizedFileURL.path, p = u.standardizedFileURL.path
+        return d == p || d.hasPrefix(p + "/")
+    }
+
+    /// 파일 복사(붙여넣기·밖에서 드롭) 또는 이동(트리 안 드래그). ⌘Z 로 되돌리기
+    func transfer(_ urls: [URL], to dir: URL, move: Bool) {
+        let fm = FileManager.default
+        var done: [(from: URL, to: URL)] = []
+        for u in urls where !isInside(dir, u) {
+            if move, u.deletingLastPathComponent().standardizedFileURL == dir.standardizedFileURL { continue } // 제자리
+            let dest = uniqueURL(in: dir, name: u.lastPathComponent)
+            do {
+                if move { try fm.moveItem(at: u, to: dest); onRenamed?(u, dest) } else { try fm.copyItem(at: u, to: dest) }
+                done.append((u, dest))
+            } catch { NSSound.beep() }
+        }
+        guard !done.isEmpty else { return }
+        outline.fileUndo.registerUndo(withTarget: self) { $0.untransfer(done, move: move) }
+        outline.fileUndo.setActionName(move ? "이동" : "복사")
+        refresh()
+        let rows = IndexSet(done.compactMap { d in node(for: d.to).map { outline.row(forItem: $0) } }.filter { $0 >= 0 })
+        if !rows.isEmpty { outline.selectRowIndexes(rows, byExtendingSelection: false); outline.scrollRowToVisible(rows.first!) }
+    }
+
+    /// 되돌리기: 이동은 제자리로, 복사본은 휴지통으로 (바로 지우지 않음)
+    private func untransfer(_ done: [(from: URL, to: URL)], move: Bool) {
+        if !move { onWillTrash?(done.map(\.to)) }
+        for d in done {
+            if move { if (try? FileManager.default.moveItem(at: d.to, to: d.from)) != nil { onRenamed?(d.to, d.from) } }
+            else { try? FileManager.default.trashItem(at: d.to, resultingItemURL: nil) }
+        }
+        let dir = done[0].to.deletingLastPathComponent()
+        outline.fileUndo.registerUndo(withTarget: self) { $0.transfer(done.map(\.from), to: dir, move: move) }
+        outline.fileUndo.setActionName(move ? "이동" : "복사")
+        refresh()
+    }
+
+    // MARK: 드래그 앤 드롭 — 폴더 위(파일 위면 그 폴더, 빈 곳이면 현재 폴더 탭)로
+
+    private func dropMove(_ info: NSDraggingInfo) -> Bool {
+        info.draggingSource as? NSOutlineView === outline && !NSEvent.modifierFlags.contains(.option)
+    }
+
+    func outlineView(_ o: NSOutlineView, validateDrop info: NSDraggingInfo, proposedItem item: Any?, proposedChildIndex index: Int) -> NSDragOperation {
+        var target = item as? FileNode
+        if let t = target, !t.isDir { target = o.parent(forItem: t) as? FileNode }
+        o.setDropItem(target, dropChildIndex: NSOutlineViewDropOnItemIndex)
+        let dir = target?.url ?? roots[sel].url, move = dropMove(info)
+        let urls = Sidebar.fileURLs(info.draggingPasteboard)
+        let ok = urls.contains { !isInside(dir, $0) && !(move && $0.deletingLastPathComponent().standardizedFileURL == dir.standardizedFileURL) }
+        return ok ? (move ? .move : .copy) : []
+    }
+
+    func outlineView(_ o: NSOutlineView, acceptDrop info: NSDraggingInfo, item: Any?, childIndex index: Int) -> Bool {
+        transfer(Sidebar.fileURLs(info.draggingPasteboard), to: (item as? FileNode)?.url ?? roots[sel].url, move: dropMove(info))
+        return true
+    }
 
     /// 현재 폴더 탭 아래 경로의 노드 (중간 폴더는 펼침)
     private func node(for url: URL) -> FileNode? {
