@@ -105,7 +105,7 @@ final class EditorView: NSTextView {
         line.fill()
     }
 
-    /// 첫 줄 오른쪽 위 작은 글씨 (마크다운 작성/수정 일시). 줄 강조 위에 그림
+    /// 첫 줄 오른쪽 작은 글씨 (마크다운 마지막 수정 일시). 줄 강조 위에 그림
     var dateText: String?
     override func drawBackground(in rect: NSRect) {
         drawLineHighlight(in: rect)
@@ -252,13 +252,12 @@ final class EditorPane: NSView {
 
     private static let dateFmt: DateFormatter = { let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm"; return f }()
 
-    /// 마크다운 메모 첫 줄 오른쪽 위: 작성 / 마지막 수정 일시 (파일 생성일·수정일)
+    /// 마크다운 메모 첫 줄 오른쪽: 마지막 수정 일시
     func updateDates() {
         var t: String?
         if let d = doc, d.media == nil, !d.preview, d.syntax.name == "Markdown",
-           let v = try? d.url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey]),
-           let c = v.creationDate, let m = v.contentModificationDate {
-            t = "작성 \(Self.dateFmt.string(from: c))   ·   수정 \(Self.dateFmt.string(from: m))"
+           let m = try? d.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate {
+            t = "수정 \(Self.dateFmt.string(from: m))"
         }
         if t != textView.dateText { textView.dateText = t; textView.setNeedsDisplay(textView.visibleRect) }
     }

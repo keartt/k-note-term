@@ -157,7 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         m.closeCurrent()
         m.sidebar.onOpen?(mdURL)
         check(m.currentViewer == "text", "탐색기에서 연 md = 항상 편집기로 시작 (\(m.currentViewer))")  // 이 탭은 아래에서 닫음
-        check(m.dateText?.contains("작성 ") == true && m.dateText?.contains("수정 ") == true, "마크다운 메모 오른쪽 위 작성/수정 일시 (\(m.dateText ?? "없음"))")
+        check(m.dateText?.hasPrefix("수정 ") == true, "마크다운 메모 첫 줄 오른쪽 마지막 수정 일시 (\(m.dateText ?? "없음"))")
         let crHTML = Markdown.html("a\r\r```\n# dd\n```")
         check(crHTML.contains("<pre>") && !crHTML.contains("<h1>"), "미리보기: 단독 CR 줄바꿈도 코드블록 인식")
 
