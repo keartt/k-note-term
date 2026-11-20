@@ -156,8 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         check(m.currentViewer == "text", "⌘⇧P 미리보기 → 편집")
         m.closeCurrent()
         m.sidebar.onOpen?(mdURL)
-        check(m.currentViewer == "text", "탐색기에서 연 md = 항상 편집기로 시작 (\(m.currentViewer))")
-        m.closeCurrent()
+        check(m.currentViewer == "text", "탐색기에서 연 md = 항상 편집기로 시작 (\(m.currentViewer))")  // 이 탭은 아래에서 닫음
         let crHTML = Markdown.html("a\r\r```\n# dd\n```")
         check(crHTML.contains("<pre>") && !crHTML.contains("<h1>"), "미리보기: 단독 CR 줄바꿈도 코드블록 인식")
 
@@ -220,12 +219,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         check(IconButton.hintShowing == m.newBtn.tip, "아이콘 버튼 호버 설명")
         m.newBtn.hideHint()
 
-        // 투명 타이틀바 아래 헤더 탭이 실제로 클릭되는지 (hit test)
+        // 투명 타이틀바 아래 헤더 탭이 실제로 클릭되는지 (hit test). 사용자 탭이 없으면 임시 탭으로
+        let hitTmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("knt-hit-\(getpid()).txt")
+        let needTmp = m.docs.isEmpty
+        if needTmp { try? "x".write(to: hitTmp, atomically: true, encoding: .utf8); m.open(hitTmp) }
+        defer { try? FileManager.default.removeItem(at: hitTmp) }
         m.window.contentView?.layoutSubtreeIfNeeded()
         let bar = m.editorTabs
         let p = bar.convert(NSPoint(x: 20, y: bar.bounds.midY), to: nil)
         let hit = m.window.contentView?.superview?.hitTest(m.window.contentView!.superview!.convert(p, from: nil))
         check(hit?.isDescendant(of: bar) ?? false, "헤더 탭 클릭 가능 (hit=\(hit.map { String(describing: type(of: $0)) } ?? "nil"), bar=\(bar.frame), tabs=\(m.docs.count))")
+        if needTmp { m.closeCurrent() }
 
         // 사이드바 너비를 바꾼 뒤 레이아웃이 다시 돌아도 유지되는지
         if !m.sidebarVisible { send(#selector(MainController.toggleSidebar)) }

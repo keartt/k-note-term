@@ -148,6 +148,7 @@ open /Applications/KNoteTerm.app
 
 ### 터미널 (⌘⇧T) — Ghostty
 - 하단 터미널은 **libghostty** (Ghostty 의 터미널 엔진, GPU 렌더링). Ghostty 앱은 설치하지 않고 소스로 빌드한 라이브러리를 앱에 포함.
+- `TERM=xterm-256color` 로 실행 (ssh 원격 서버에도 정의가 있어 Ctrl+L·vim·less 가 그대로 동작).
 - 탭 여러 개 + 탭마다 세로/가로 분할 (⌘T / ⌘D / ⌘⇧D / ⌘W / ⌘] / ⌘K). 새 탭·분할은 현재 패널의 작업 폴더를 이어받음.
 - 탭 **별칭**: 터미널 탭 더블클릭(또는 우클릭 > 이름 지정)으로 이름 입력. 비우면 자동 이름(현재 폴더)으로 돌아감.
 - 로그인 셸(`$SHELL`, 보통 zsh) 실행 → `.zprofile`/`.zshrc`, alias, PATH 동일. 셸 통합으로 탭 제목 = 현재 폴더.

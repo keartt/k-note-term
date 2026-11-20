@@ -9,6 +9,7 @@ final class GhosttyRuntime {
 
     /// 앱 테마(Anura)에 맞춘 기본값 + 사용자가 쓰던 iTerm 키 습관. ~/.config/ghostty/config 가 있으면 그게 우선.
     /// 글꼴: D2Coding (앱에 포함) — 한글 폭이 영문의 정확히 2배라 띄엄띄엄 보이지 않음.
+    /// term: xterm-ghostty 는 ssh 원격 서버에 정의가 없어 Ctrl+L·vim·less 가 깨짐 → 어디에나 있는 xterm-256color.
     /// D2Coding 의 | 는 가운데가 끊긴 모양이라 그 글자만 Source Code Pro 의 일자 막대로 대체.
     static let defaultConfig = """
     font-family = D2Coding
@@ -26,6 +27,7 @@ final class GhosttyRuntime {
     confirm-close-surface = false
     macos-option-as-alt = false
     shell-integration-features = no-cursor
+    term = xterm-256color
     keybind = super+left=text:\\x01
     keybind = super+right=text:\\x05
     keybind = super+backspace=text:\\x15
