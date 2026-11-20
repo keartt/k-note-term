@@ -310,6 +310,15 @@ final class AppWindow: NSWindow {
         if ok { onResponderChange?(r) }
         return ok
     }
+    /// ⌃⇥ / ⌃⇧⇥ = 다음 / 이전 탭 (+1 / -1). 텍스트 뷰·터미널보다 먼저 가로챔
+    var onCtrlTab: ((Int) -> Void)?
+    override func performKeyEquivalent(with e: NSEvent) -> Bool {
+        let m = e.modifierFlags.intersection([.command, .option, .control, .shift])
+        if e.type == .keyDown, e.keyCode == 48, m == .control || m == [.control, .shift], let f = onCtrlTab {
+            f(m.contains(.shift) ? -1 : 1); return true
+        }
+        return super.performKeyEquivalent(with: e)
+    }
     /// 마우스 클릭한 뷰 (영역 포커스용). 클릭 처리가 끝난 뒤 알림
     var onMouseDown: ((NSView) -> Void)?
     override func sendEvent(_ e: NSEvent) {

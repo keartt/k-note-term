@@ -161,6 +161,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let crHTML = Markdown.html("a\r\r```\n# dd\n```")
         check(crHTML.contains("<pre>") && !crHTML.contains("<h1>"), "미리보기: 단독 CR 줄바꿈도 코드블록 인식")
 
+        // ⌃⇥ / ⌃⇧⇥ = 다음 / 이전 메모 탭 (실제 키 이벤트로)
+        let tabA = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("knt-tabA-\(getpid()).txt")
+        let tabB = tabA.deletingLastPathComponent().appendingPathComponent("knt-tabB-\(getpid()).txt")
+        for u in [tabA, tabB] { try? "x".write(to: u, atomically: true, encoding: .utf8); m.open(u) }
+        m.window.makeFirstResponder(m.editorText)
+        func ctrlTab(_ shift: Bool) {
+            let ev = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: shift ? [.control, .shift] : .control, timestamp: 0,
+                                      windowNumber: m.window.windowNumber, context: nil, characters: "\t", charactersIgnoringModifiers: "\t", isARepeat: false, keyCode: 48)!
+            _ = m.window.performKeyEquivalent(with: ev)
+        }
+        ctrlTab(true)
+        let prevOK = m.currentURL?.standardizedFileURL == tabA.standardizedFileURL
+        ctrlTab(false)
+        check(prevOK && m.currentURL?.standardizedFileURL == tabB.standardizedFileURL, "⌃⇧⇥ / ⌃⇥ 이전 / 다음 메모 탭")
+        m.closeCurrent(); m.open(tabA); m.closeCurrent()
+        [tabA, tabB].forEach { try? FileManager.default.removeItem(at: $0) }
+
         // 기본 폴더 메모: 문법 바꾸면 확장자도 변경
         send(#selector(MainController.newNote))
         let memo = m.currentURL!

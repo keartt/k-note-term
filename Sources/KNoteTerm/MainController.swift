@@ -412,6 +412,7 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
             updateFocusRing()
         }
         window.onMouseDown = { [weak self] in self?.focusArea(clicked: $0) }
+        window.onCtrlTab = { [weak self] in $0 > 0 ? self?.nextTab() : self?.prevTab() } // ⌘⇧] / ⌘⇧[ 와 같은 라우팅
         if let pt = state.paneTabs, pt.count == 2 {
             pendingSplit = (pt, state.activePane ?? 0, state.splitVertical ?? true)
         }
