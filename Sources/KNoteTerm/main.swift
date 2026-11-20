@@ -157,6 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         m.closeCurrent()
         m.sidebar.onOpen?(mdURL)
         check(m.currentViewer == "text", "탐색기에서 연 md = 항상 편집기로 시작 (\(m.currentViewer))")  // 이 탭은 아래에서 닫음
+        check(m.dateText?.contains("작성 ") == true && m.dateText?.contains("수정 ") == true, "마크다운 메모 오른쪽 위 작성/수정 일시 (\(m.dateText ?? "없음"))")
         let crHTML = Markdown.html("a\r\r```\n# dd\n```")
         check(crHTML.contains("<pre>") && !crHTML.contains("<h1>"), "미리보기: 단독 CR 줄바꿈도 코드블록 인식")
 
@@ -540,7 +541,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("마크다운 미리보기", #selector(MainController.togglePreview), "p", [.command, .shift]),
             item("에디터 분할 / 합치기", #selector(MainController.toggleEditorSplit), "\\"),
             item("에디터 분할 방향 바꾸기", #selector(MainController.rotateEditorSplit), "\\", [.command, .option]),
-            item("집중 모드 (전체 화면 · 헤더 숨김)", #selector(MainController.toggleFocusMode), "f", [.command, .shift]),
+            item("상단 탭바 숨기기 (전체 화면)", #selector(MainController.toggleFocusMode), "f", [.command, .shift]),
             .separator(),
             item("글자 크게", #selector(MainController.fontBigger), "="),
             item("글자 작게", #selector(MainController.fontSmaller), "-"),

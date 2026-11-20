@@ -86,7 +86,7 @@ final class EditorView: NSTextView {
     override var acceptableDragTypes: [NSPasteboard.PasteboardType] { super.acceptableDragTypes + [.fileURL] }
 
     /// 현재 줄 강조 (CotEditor Anura lineHighlight)
-    override func drawBackground(in rect: NSRect) {
+    private func drawLineHighlight(in rect: NSRect) {
         super.drawBackground(in: rect)
         guard selectedRange().length == 0, let lm = layoutManager, let tc = textContainer else { return }
         let loc = selectedRange().location
@@ -103,6 +103,18 @@ final class EditorView: NSTextView {
         line.size.width = bounds.width
         Theme.lineHighlight.setFill()
         line.fill()
+    }
+
+    /// 첫 줄 오른쪽 위 작은 글씨 (마크다운 작성/수정 일시). 줄 강조 위에 그림
+    var dateText: String?
+    override func drawBackground(in rect: NSRect) {
+        drawLineHighlight(in: rect)
+        guard let t = dateText else { return }
+        let a: [NSAttributedString.Key: Any] = [.font: Theme.ui(10.5), .foregroundColor: Theme.fgSubtle]
+        let size = (t as NSString).size(withAttributes: a)
+        // 첫 줄과 같은 높이 (줄 높이 가운데)
+        let lineH = layoutManager.map { $0.defaultLineHeight(for: font ?? Theme.mono(14)) * 1.3 } ?? size.height
+        (t as NSString).draw(at: NSPoint(x: bounds.width - size.width - 14, y: textContainerOrigin.y + (lineH - size.height) / 2), withAttributes: a)
     }
 
     /// ⌘⌫: 줄 앞부분 삭제. 이미 줄 맨 앞(지울 게 없음)이면 그 줄 자체를 지움 (앞 줄바꿈 삭제)
@@ -238,6 +250,19 @@ final class EditorPane: NSView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
+    private static let dateFmt: DateFormatter = { let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm"; return f }()
+
+    /// 마크다운 메모 첫 줄 오른쪽 위: 작성 / 마지막 수정 일시 (파일 생성일·수정일)
+    func updateDates() {
+        var t: String?
+        if let d = doc, d.media == nil, !d.preview, d.syntax.name == "Markdown",
+           let v = try? d.url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey]),
+           let c = v.creationDate, let m = v.contentModificationDate {
+            t = "작성 \(Self.dateFmt.string(from: c))   ·   수정 \(Self.dateFmt.string(from: m))"
+        }
+        if t != textView.dateText { textView.dateText = t; textView.setNeedsDisplay(textView.visibleRect) }
+    }
+
     /// 이 칸의 텍스트 뷰만 다른 문서로 옮김.
     /// replaceTextStorage 는 같은 문서를 보던 다른 칸까지 통째로 옮겨 버려서(같은 파일 분할 후 한쪽만 바꾸면 둘 다 바뀜) 직접 떼고 붙임
     func attach(_ storage: NSTextStorage) {
@@ -283,6 +308,7 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
     var lineRulerWidth: CGFloat { rulers.first?.ruleThickness ?? 0 }
     var paneDocNames: [String] { panes.map { $0.doc?.url.lastPathComponent ?? "-" } }
     var paneTexts: [String] { panes.map(\.shownText) }
+    var dateText: String? { pane.textView.dateText }
     var activePane: Int { active }
     /// 재실행 시 복원할 분할 상태 (창이 뜬 뒤 restoreLayout 에서 적용)
     private var pendingSplit: (paths: [String], active: Int, vertical: Bool)?
@@ -670,6 +696,7 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
     }
 
     private func updateStatus() {
+        panes.forEach { $0.updateDates() }   // 저장되면 수정 시각도 갱신
         zoomBox.isHidden = doc?.media == nil
         updateZoomLabel()
         guard let d = doc else { statusLeft.stringValue = ""; statusRight.stringValue = ""; return }
@@ -1199,12 +1226,12 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
     /// 메모 영역에서 실제로 보이는 뷰 (텍스트 / PDF / 이미지)
     private var editorFocusTarget: NSView { doc == nil ? emptyView : pane.focusTarget }
 
-    // MARK: 집중 모드 (⌘⇧F) — 전체 화면 + 상단 헤더 숨김. 터미널에 포커스가 있으면 터미널만 남김
+    // MARK: 집중 모드 (⌘⇧F) — 전체 화면일 때 상단 탭바 숨기기/보이기. 터미널에 포커스가 있으면 터미널만 남김
 
     private var chrome: [NSView] = []
     private var chromeTop: NSLayoutConstraint!, bareTop: NSLayoutConstraint!
     /// 켜기 전 상태 (끌 때 복원)
-    private var focusMode: (sidebar: Bool, editor: Bool, terminalOnly: Bool, wasFull: Bool)?
+    private var focusMode: (sidebar: Bool, editor: Bool, terminalOnly: Bool)?
     var focusModeOn: Bool { focusMode != nil }
     var headerVisible: Bool { !(chrome.first?.isHidden ?? true) }
     private var isFullScreen: Bool { window.styleMask.contains(.fullScreen) }
@@ -1216,13 +1243,13 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
             if f.editor { setEditor(true) }
             if f.sidebar { setSidebar(true) }
             if f.terminalOnly { terminal.focus(terminal.activeTerm) }
-            if !f.wasFull, isFullScreen { window.toggleFullScreen(nil) }
         } else {
+            // 창 모드에서 헤더를 숨기면 신호등이 본문을 덮음 → 전체 화면에서만 (자가 점검은 화면을 뺏지 않으려고 창 모드로 확인)
+            guard isFullScreen || isSelfTest else { NSSound.beep(); return }
             let termOnly = terminalVisible && terminalFocused
-            focusMode = (sidebarVisible, editorVisible, termOnly, isFullScreen)
+            focusMode = (sidebarVisible, editorVisible, termOnly)
             if termOnly { setSidebar(false); setEditor(false) }
             setChrome(false)
-            if !isFullScreen, !isSelfTest { window.toggleFullScreen(nil) } // 자가 점검은 화면을 뺏지 않음
         }
     }
 
@@ -1232,8 +1259,13 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
         chromeTop.isActive = show
     }
 
-    /// 초록 버튼·⌃⌘F 로 전체 화면을 빠져나오면 집중 모드도 끔 (헤더 없이 창 모드가 되지 않게)
-    func windowDidExitFullScreen(_ n: Notification) { if focusMode != nil { toggleFocusMode() } }
+    /// 전체 화면에서는 빈 툴바(신호등 자리용)가 맨 위에 남아 헤더 탭을 가림 → 전체 화면 동안 숨김
+    func windowWillEnterFullScreen(_ n: Notification) { window.toolbar?.isVisible = false }
+    /// 전체 화면을 빠져나오면 툴바 복원 + 집중 모드도 끔 (헤더 없이 창 모드가 되지 않게)
+    func windowDidExitFullScreen(_ n: Notification) {
+        window.toolbar?.isVisible = true
+        if focusMode != nil { toggleFocusMode() }
+    }
 
     @objc func toggleSidebar() { setSidebar(!sidebarVisible) }
     @objc func toggleTerminal() { setTerminal(!terminalVisible) }
