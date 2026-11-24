@@ -1,15 +1,18 @@
-import Foundation
+import AppKit
 
 /// 미리보기용 최소 마크다운 → HTML (GFM 자주 쓰는 것만: 제목, 목록/체크박스, 인용, 코드블록, 표, 구분선, 인라인)
 enum Markdown {
-    static func html(_ src: String) -> String {
-        var out = "", para: [String] = [], list: String? = nil
+    /// base = 원문에서 첫 줄의 줄 번호 (인용 안쪽을 다시 변환할 때 체크박스 줄 번호를 맞추려고)
+    static func html(_ src: String, base: Int = 0) -> String {
+        var out = "", para: [String] = []
+        var lists: [(indent: Int, tag: String)] = []   // 열린 목록 (각각 마지막 <li> 가 열려 있음)
         let lines = src.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n")
         var i = 0
 
         func flushPara() { if !para.isEmpty { out += "<p>\(para.map(inline).joined(separator: "<br>"))</p>\n"; para = [] } }
-        func closeList() { if let l = list { out += "</\(l)>\n"; list = nil } }
-        func flush() { flushPara(); closeList() }
+        func closeLists() { while let l = lists.popLast() { out += "</li></\(l.tag)>\n" } }
+        func flush() { flushPara(); closeLists() }
+        func indent(_ s: String) -> Int { s.prefix { $0 == " " || $0 == "\t" }.reduce(0) { $0 + ($1 == "\t" ? 4 : 1) } }
         func cells(_ s: String) -> [String] {
             var t = s.trimmingCharacters(in: .whitespaces)
             if t.hasPrefix("|") { t.removeFirst() }
@@ -21,13 +24,13 @@ enum Markdown {
             let line = lines[i], t = line.trimmingCharacters(in: .whitespaces)
             if t.hasPrefix("```") || t.hasPrefix("~~~") {               // 코드 블록
                 flush()
-                let fence = String(t.prefix(3)), lang = esc(String(t.dropFirst(3)).trimmingCharacters(in: .whitespaces))
+                let fence = String(t.prefix(3)), lang = String(t.dropFirst(3)).trimmingCharacters(in: .whitespaces)
                 var code: [String] = []
                 i += 1
                 while i < lines.count, !lines[i].trimmingCharacters(in: .whitespaces).hasPrefix(fence) { code.append(lines[i]); i += 1 }
-                out += "<pre><code class=\"lang-\(lang)\">\(esc(code.joined(separator: "\n")))</code></pre>\n"
+                out += codeBlock(code.joined(separator: "\n"), lang: lang)
             } else if t.isEmpty {
-                flush()
+                flushPara()   // 빈 줄로 목록을 끊지 않음 (항목 사이 빈 줄)
             } else if let m = t.firstMatch(of: /^(#{1,6})\s+(.*?)\s*#*$/) {
                 flush()
                 out += "<h\(m.1.count)>\(inline(String(m.2)))</h\(m.1.count)>\n"
@@ -36,12 +39,13 @@ enum Markdown {
             } else if t.hasPrefix(">") {
                 flush()
                 var q: [String] = []
+                let qStart = i
                 while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).hasPrefix(">") {
                     var s = lines[i].trimmingCharacters(in: .whitespaces).dropFirst()
                     if s.hasPrefix(" ") { s = s.dropFirst() }
                     q.append(String(s)); i += 1
                 }
-                out += "<blockquote>\(html(q.joined(separator: "\n")))</blockquote>\n"
+                out += "<blockquote>\(html(q.joined(separator: "\n"), base: base + qStart))</blockquote>\n"
                 continue
             } else if t.contains("|"), i + 1 < lines.count,
                       lines[i + 1].trimmingCharacters(in: .whitespaces).wholeMatch(of: /\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?/) != nil {
@@ -53,25 +57,73 @@ enum Markdown {
                 }
                 out += "</tbody></table>\n"
                 continue
-            } else if let m = line.firstMatch(of: /^(\s*)([-*+]|\d+[.)])\s+(.*)$/) {
+            } else if let m = line.firstMatch(of: /^[ \t]*([-*+]|(\d+)[.)])\s+(.*)$/) {
+                // 목록: 들여쓰기 2칸 이상 깊으면 안쪽 목록, 같은 깊이면 다음 항목
                 flushPara()
-                let tag = m.2.first!.isNumber ? "ol" : "ul"
-                if list != tag { closeList(); out += "<\(tag)>\n"; list = tag }
+                let ind = indent(line), tag = m.2 == nil ? "ul" : "ol"
+                while let l = lists.last, l.indent > ind + 1 { out += "</li></\(l.tag)>\n"; lists.removeLast() }
+                var open = true
+                if let l = lists.last, ind <= l.indent + 1 {
+                    if l.tag == tag { out += "</li>\n"; open = false } else { out += "</li></\(l.tag)>\n"; lists.removeLast() }
+                }
+                if open {
+                    let start = m.2.flatMap { Int($0) }.map { $0 == 1 ? "" : " start=\"\($0)\"" } ?? ""
+                    out += "<\(tag)\(start)>\n"; lists.append((ind, tag))
+                }
                 var body = String(m.3), cls = ""
                 if let c = body.firstMatch(of: /^\[([ xX])\]\s+(.*)$/) {
                     cls = " class=\"task\""
-                    body = "<input type=\"checkbox\" disabled\(c.1 == " " ? "" : " checked")> " + inline(String(c.2))
+                    body = "<input type=\"checkbox\" data-line=\"\(base + i)\"\(c.1 == " " ? "" : " checked")> " + inline(String(c.2))
                 } else { body = inline(body) }
-                let indent = min(m.1.count / 2, 4)
-                out += "<li\(cls)\(indent > 0 ? " style=\"margin-left:\(Double(indent) * 1.4)em\"" : "")>\(body)</li>\n"
+                out += "<li\(cls)>\(body)"
+            } else if !lists.isEmpty, indent(line) > 0 {
+                out += "<br>" + inline(t)                               // 목록 항목의 이어지는 줄
+            } else if para.isEmpty, indent(line) >= 4 {                 // 들여쓴 코드 블록
+                flush()
+                var code: [String] = []
+                while i < lines.count, lines[i].trimmingCharacters(in: .whitespaces).isEmpty || indent(lines[i]) >= 4 {
+                    var l = Substring(lines[i]), n = 0
+                    while n < 4, let c = l.first, c == " " || c == "\t" { n += c == "\t" ? 4 : 1; l = l.dropFirst() }
+                    code.append(String(l)); i += 1
+                }
+                while code.last?.isEmpty == true { code.removeLast() }
+                out += codeBlock(code.joined(separator: "\n"), lang: "")
+                continue
             } else {
-                closeList()
+                closeLists()
                 para.append(t)
             }
             i += 1
         }
         flush()
         return out
+    }
+
+    /// 코드 블록: 언어가 앱 문법에 있으면 같은 색으로 칠함 + 오른쪽 위 복사 버튼
+    static func codeBlock(_ code: String, lang: String) -> String {
+        "<div class=\"code\"><pre><code class=\"lang-\(esc(lang))\">\(highlight(code, lang: lang))</code></pre>"
+            + "<button class=\"copy\" onclick=\"copyCode(this)\">복사</button></div>\n"
+    }
+
+    static func highlight(_ code: String, lang: String) -> String {
+        guard let syn = Syntax.forLang(lang) else { return esc(code) }
+        let ns = code as NSString
+        var col = [NSColor?](repeating: nil, count: ns.length)
+        for (r, c) in syn.colorRuns(code) { for k in r.location..<NSMaxRange(r) { col[k] = c } }
+        var out = "", a = 0
+        while a < ns.length {
+            var b = a + 1
+            while b < ns.length, col[b] === col[a] { b += 1 }
+            let t = esc(ns.substring(with: NSRange(location: a, length: b - a)))
+            out += col[a].map { "<span style=\"color:\(hex($0))\">\(t)</span>" } ?? t
+            a = b
+        }
+        return out
+    }
+
+    static func hex(_ c: NSColor) -> String {
+        let c = c.usingColorSpace(.sRGB) ?? c
+        return String(format: "#%02x%02x%02x", Int(c.redComponent * 255), Int(c.greenComponent * 255), Int(c.blueComponent * 255))
     }
 
     // Swift Regex 는 lookbehind 미지원 → ICU
@@ -124,7 +176,16 @@ enum Markdown {
         blockquote > :last-child { margin-bottom: 0; }
         ul, ol { padding-left: 1.6em; } li { margin: .2em 0; } li::marker { color: #72e3ad; }
         li.task { list-style: none; margin-left: -1.3em; }
-        input[type=checkbox] { accent-color: #72e3ad; margin-right: .4em; }
+        li > ul, li > ol { margin: .2em 0 .2em; }
+        input[type=checkbox] { accent-color: #72e3ad; margin-right: .4em; cursor: pointer; }
+        .code { position: relative; margin: 0 0 1em; } .code pre { margin: 0; }
+        .copy { position: absolute; top: 8px; right: 8px; font: 11px Inter, sans-serif; color: #bdbdbd; background: #333;
+                border: 1px solid #444; border-radius: 6px; padding: 3px 9px; cursor: pointer; opacity: 0; transition: opacity .15s; }
+        .code:hover .copy { opacity: 1; } .copy:hover { color: #72e3ad; border-color: #72e3ad; }
+        html { scrollbar-width: thin; scrollbar-color: #4a4a4a transparent; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-thumb { background: #4a4a4a; border-radius: 4px; }
+        ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
         hr { border: 0; height: 1px; background: linear-gradient(90deg, transparent, #4a4a4a, transparent); margin: 2em 0; }
         table { border-collapse: separate; border-spacing: 0; border: 1px solid #3a3a3a; border-radius: 8px; overflow: hidden; }
         th, td { padding: 7px 13px; border-bottom: 1px solid #333; text-align: left; }
@@ -134,6 +195,15 @@ enum Markdown {
         ::selection { background: #2f4a3e; }
         </style></head><body>
         \(html(src))
+        <script>
+        // 복사 버튼 / 체크박스 → 앱 (클립보드 쓰기, 원문 [ ] ↔ [x] 변경)
+        function copyCode(b) {
+          webkit.messageHandlers.knt.postMessage({copy: b.parentNode.querySelector('code').textContent});
+          b.textContent = '복사됨'; setTimeout(() => b.textContent = '복사', 1200);
+        }
+        document.querySelectorAll('input[data-line]').forEach(c =>
+          c.addEventListener('change', () => webkit.messageHandlers.knt.postMessage({task: +c.dataset.line})));
+        </script>
         </body></html>
         """
     }

@@ -151,13 +151,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let ph = m.previewText
         check(m.currentViewer == "preview" && ph.contains("<h1>제목</h1>") && ph.contains("checked") && ph.contains("<table>")
               && ph.contains("<em>기울임</em>") && ph.contains("<strong>굵게</strong>") && ph.contains("<code>a*b*c</code>")
-              && ph.contains("&lt;tag&gt;") && ph.contains("let x = 1 &lt; 2"), "md 미리보기 렌더")
+              && ph.contains("&lt;tag&gt;") && ph.contains("<span style=\"color:#4d92ab\">let</span> x = ") && ph.contains("&lt; ")
+              && ph.contains("copyCode(this)") && ph.contains("data-line=\"2\""), "md 미리보기 렌더 (코드 하이라이트·복사 버튼·체크박스 줄 번호)")
+        let nested = Markdown.html("- a\n    - b\n- c\n\n> - [ ] q")
+        check(nested.components(separatedBy: "<ul>").count == 4 && nested.contains("<li>a<ul>") && nested.contains("data-line=\"4\""), "미리보기: 중첩 목록 · 인용 안 체크박스 줄 번호")
+        check(Markdown.html("    let a = 1").contains("<pre>") && Markdown.highlight("const a", lang: "javascript").contains("<span"), "미리보기: 들여쓴 코드 블록 · 언어 별칭 하이라이트")
+        if let pd = m.docs.first(where: { $0.url == mdURL }) {
+            m.toggleTask(pd, line: 2)
+            check((try? String(contentsOf: mdURL, encoding: .utf8))?.contains("- [ ] 할일") == true, "미리보기 체크박스 클릭 → 원문 [x] → [ ] 저장")
+        }
         send(#selector(MainController.togglePreview))
         check(m.currentViewer == "text", "⌘⇧P 미리보기 → 편집")
         m.closeCurrent()
         m.sidebar.onOpen?(mdURL)
         check(m.currentViewer == "text", "탐색기에서 연 md = 항상 편집기로 시작 (\(m.currentViewer))")  // 이 탭은 아래에서 닫음
         check(m.dateText?.hasPrefix("수정 ") == true, "마크다운 메모 첫 줄 오른쪽 마지막 수정 일시 (\(m.dateText ?? "없음"))")
+        let et = m.editorText
+        et.setSelectedRange(NSRange(location: (et.string as NSString).length, length: 0))
+        et.insertText("\n3. 셋", replacementRange: et.selectedRange())
+        et.insertNewline(nil)
+        let cont = et.string.hasSuffix("3. 셋\n4. ")
+        et.insertNewline(nil)
+        check(cont && et.string.hasSuffix("3. 셋\n"), "md 편집: 엔터 = 목록 번호 이어 쓰기, 빈 항목 엔터 = 기호 지움")
         let crHTML = Markdown.html("a\r\r```\n# dd\n```")
         check(crHTML.contains("<pre>") && !crHTML.contains("<h1>"), "미리보기: 단독 CR 줄바꿈도 코드블록 인식")
 

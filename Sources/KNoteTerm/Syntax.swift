@@ -77,23 +77,44 @@ struct Syntax {
 
     static var markdown: Syntax { named("Markdown")! }
 
-    func apply(to ts: NSTextStorage, base: [NSAttributedString.Key: Any]) {
-        let full = NSRange(location: 0, length: ts.length), s = ts.string
-        ts.beginEditing()
-        ts.setAttributes(base, range: full)
-        if ts.length < 3_000_000 { // 전체 재하이라이트, 수 MB 넘으면 생략. 큰 파일 필요하면 보이는 영역만 칠하기
-            for (re, color) in rules {
-                re.enumerateMatches(in: s, range: full) { m, _, _ in
-                    if let r = m?.range, r.length > 0 { ts.addAttribute(.foregroundColor, value: color, range: r) }
-                }
-            }
-            commentOrString?.enumerateMatches(in: s, range: full) { m, _, _ in
-                guard let m, m.range.length > 0 else { return }
-                let isComment = m.range(at: 1).location != NSNotFound
-                ts.addAttribute(.foregroundColor, value: isComment ? Syntax.comment : Syntax.string, range: m.range)
+    /// 색칠할 범위 (뒤에 온 것이 이김). 수 MB 넘으면 생략
+    func colorRuns(_ s: String) -> [(NSRange, NSColor)] {
+        let full = NSRange(location: 0, length: (s as NSString).length)
+        guard full.length < 3_000_000 else { return [] }
+        var out: [(NSRange, NSColor)] = []
+        for (re, color) in rules {
+            re.enumerateMatches(in: s, range: full) { m, _, _ in
+                if let r = m?.range, r.length > 0 { out.append((r, color)) }
             }
         }
-        ts.endEditing()
+        commentOrString?.enumerateMatches(in: s, range: full) { m, _, _ in
+            guard let m, m.range.length > 0 else { return }
+            out.append((m.range, m.range(at: 1).location != NSNotFound ? Syntax.comment : Syntax.string))
+        }
+        return out
+    }
+
+    /// 글꼴·줄 간격은 바뀌었을 때만 본문 속성으로 (전체 재배치라 비쌈),
+    /// 색은 레이아웃 매니저의 임시 속성으로 칠함 → 타이핑마다 재하이라이트해도 다시 배치하지 않음
+    func apply(to ts: NSTextStorage, base: [NSAttributedString.Key: Any]) {
+        let full = NSRange(location: 0, length: ts.length)
+        if ts.length > 0, (ts.attribute(.font, at: 0, effectiveRange: nil) as? NSFont) != base[.font] as? NSFont {
+            ts.setAttributes(base, range: full)
+        }
+        let runs = colorRuns(ts.string)
+        for lm in ts.layoutManagers {
+            lm.removeTemporaryAttribute(.foregroundColor, forCharacterRange: full)
+            for (r, c) in runs { lm.addTemporaryAttribute(.foregroundColor, value: c, forCharacterRange: r) }
+        }
+    }
+
+    /// 코드 블록 언어 이름(js, java, python …)으로 문법 찾기
+    static func forLang(_ lang: String) -> Syntax? {
+        let l = lang.lowercased()
+        let alias = ["javascript": "js", "typescript": "ts", "kotlin": "kt", "python": "py", "shell": "sh", "console": "sh",
+                     "c++": "cpp", "c": "c", "objc": "m", "golang": "go", "rust": "rs", "yml": "yml"]
+        guard !l.isEmpty else { return nil }
+        return all.first { $0.name.lowercased() == l || $0.files.contains(alias[l] ?? l) }
     }
 }
 

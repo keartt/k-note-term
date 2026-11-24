@@ -48,6 +48,7 @@ final class Doc {
     var saveError: String?
     var sel = NSRange(location: 0, length: 0)
     var preview = false   // 마크다운 미리보기로 보는 중
+    var stats: (lines: Int, chars: Int)?   // 상태바 줄 수·글자 수 캐시 (내용이 바뀌면 nil)
     var canPreview: Bool { media == nil && syntax.name == "Markdown" }
 
     init?(url: URL, syntax: Syntax?) {
@@ -85,36 +86,94 @@ final class EditorView: NSTextView {
     var onExternalDrop: (([URL]) -> Void)?
     override var acceptableDragTypes: [NSPasteboard.PasteboardType] { super.acceptableDragTypes + [.fileURL] }
 
-    /// 현재 줄 강조 (CotEditor Anura lineHighlight)
-    private func drawLineHighlight(in rect: NSRect) {
-        super.drawBackground(in: rect)
-        guard selectedRange().length == 0, let lm = layoutManager, let tc = textContainer else { return }
-        let loc = selectedRange().location
+    /// 현재 줄 사각형 (선택 중이면 nil). 줄 끝 커서가 아니면 문서 전체 배치를 강제하지 않음
+    private func currentLineRect() -> NSRect? {
+        guard selectedRange().length == 0, let lm = layoutManager, let tc = textContainer else { return nil }
+        let loc = selectedRange().location, len = (string as NSString).length
         var line: NSRect
-        if loc >= (string as NSString).length, !lm.extraLineFragmentRect.isEmpty {
+        if loc >= len { lm.ensureLayout(for: tc) }
+        if loc >= len, !lm.extraLineFragmentRect.isEmpty {
             line = lm.extraLineFragmentRect
         } else {
-            lm.ensureLayout(for: tc)
-            let g = lm.glyphIndexForCharacter(at: min(loc, max(0, (string as NSString).length - 1)))
-            line = lm.lineFragmentRect(forGlyphAt: g, effectiveRange: nil)
+            line = lm.lineFragmentRect(forGlyphAt: lm.glyphIndexForCharacter(at: min(loc, max(0, len - 1))), effectiveRange: nil)
         }
         line.origin.y += textContainerOrigin.y
         line.origin.x = 0
         line.size.width = bounds.width
+        return line
+    }
+
+    /// 선택이 바뀌면 이전 줄·새 줄만 다시 그림 (화면 전체를 다시 그리면 드래그가 버벅임)
+    private var litLine: NSRect?
+    func refreshLineHighlight() {
+        // 편집 처리 도중(다른 칸 선택 보정)엔 배치를 건드리면 안 됨 → 화면 전체로 대체
+        guard textStorage?.editedMask.isEmpty ?? true else { setNeedsDisplay(visibleRect); litLine = nil; return }
+        let new = currentLineRect()
+        guard new != litLine else { return }
+        if let o = litLine { setNeedsDisplay(o) }
+        if let n = new { setNeedsDisplay(n) }
+        litLine = new
+    }
+
+    /// 현재 줄 강조 (CotEditor Anura lineHighlight)
+    private func drawLineHighlight(in rect: NSRect) {
+        super.drawBackground(in: rect)
+        guard let line = currentLineRect(), line.intersects(rect) else { return }
         Theme.lineHighlight.setFill()
         line.fill()
     }
 
-    /// 첫 줄 오른쪽 작은 글씨 (마크다운 마지막 수정 일시). 줄 강조 위에 그림
+    /// 첫 줄 위 여백의 작은 글씨 (마크다운 마지막 수정 일시). 본문 글자와 겹치지 않게 위쪽 여백에 그림
     var dateText: String?
     override func drawBackground(in rect: NSRect) {
         drawLineHighlight(in: rect)
         guard let t = dateText else { return }
-        let a: [NSAttributedString.Key: Any] = [.font: Theme.ui(10.5), .foregroundColor: Theme.fgSubtle]
+        let a: [NSAttributedString.Key: Any] = [.font: Theme.ui(10), .foregroundColor: Theme.fgSubtle]
         let size = (t as NSString).size(withAttributes: a)
-        // 첫 줄과 같은 높이 (줄 높이 가운데)
-        let lineH = layoutManager.map { $0.defaultLineHeight(for: font ?? Theme.mono(14)) * 1.3 } ?? size.height
-        (t as NSString).draw(at: NSPoint(x: bounds.width - size.width - 14, y: textContainerOrigin.y + (lineH - size.height) / 2), withAttributes: a)
+        (t as NSString).draw(at: NSPoint(x: bounds.width - size.width - 14, y: max(1, (textContainerOrigin.y - size.height) / 2)), withAttributes: a)
+    }
+
+    /// 마크다운: 엔터 = 들여쓰기 유지 + 목록 기호 이어 쓰기 (빈 항목에서 엔터 = 기호 지움). 그 외 문서도 들여쓰기는 유지
+    var markdown = false
+    override func insertNewline(_ sender: Any?) {
+        let s = string as NSString, r = selectedRange()
+        guard !hasMarkedText(), r.location <= s.length else { return super.insertNewline(sender) }
+        let start = s.lineRange(for: NSRange(location: r.location, length: 0)).location
+        let head = s.substring(with: NSRange(location: start, length: r.location - start))
+        var prefix = String(head.prefix { $0 == " " || $0 == "\t" })
+        if markdown, let m = head.wholeMatch(of: /([ \t]*)([-*+]|(\d+)([.)]))([ \t]+)(\[[ xX]\][ \t]+)?(.*)/) {
+            if m.7.isEmpty {
+                insertText("", replacementRange: NSRange(location: start, length: r.location - start))
+                return
+            }
+            let marker = m.3.flatMap { Int($0) }.map { "\($0 + 1)\(m.4 ?? ".")" } ?? String(m.2)
+            prefix = String(m.1) + marker + String(m.5) + (m.6 == nil ? "" : "[ ] ")
+        }
+        insertText("\n" + prefix, replacementRange: r)
+    }
+
+    /// 마크다운 목록 줄에서 ⇥ / ⇧⇥ = 항목 들여쓰기 / 내어쓰기 (공백 4칸)
+    private var listLineStart: Int? {
+        let s = string as NSString, r = selectedRange()
+        guard markdown, !hasMarkedText(), r.location <= s.length else { return nil }
+        let lr = s.lineRange(for: r)
+        return s.substring(with: lr).firstMatch(of: /^[ \t]*([-*+]|\d+[.)])[ \t]/) == nil ? nil : lr.location
+    }
+    override func insertTab(_ sender: Any?) {
+        guard let start = listLineStart else { return super.insertTab(sender) }
+        let r = selectedRange()
+        insertText("    ", replacementRange: NSRange(location: start, length: 0))
+        setSelectedRange(NSRange(location: r.location + 4, length: r.length))
+    }
+    override func insertBacktab(_ sender: Any?) {
+        guard let start = listLineStart else { return super.insertBacktab(sender) }
+        let s = string as NSString, r = selectedRange()
+        var n = 0
+        while n < 4, start + n < s.length, s.character(at: start + n) == 32 { n += 1 }
+        if n == 0, start < s.length, s.character(at: start) == 9 { n = 1 }
+        guard n > 0 else { return }
+        insertText("", replacementRange: NSRange(location: start, length: n))
+        setSelectedRange(NSRange(location: max(start, r.location - n), length: r.length))
     }
 
     /// ⌘⌫: 줄 앞부분 삭제. 이미 줄 맨 앞(지울 게 없음)이면 그 줄 자체를 지움 (앞 줄바꿈 삭제)
@@ -282,7 +341,7 @@ final class EditorPane: NSView {
     }
 }
 
-final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNavigationDelegate {
+final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNavigationDelegate, WKScriptMessageHandler {
     let window = AppWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 780),
                            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                            backing: .buffered, defer: false)
@@ -641,6 +700,7 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
         p.ruler = setupEditor(p.textView, p.textScroll)
         p.textView.onExternalDrop = { [weak self] in self?.importExternal($0) }
         p.previewView.navigationDelegate = self
+        p.previewView.configuration.userContentController.add(self, name: "knt")
         NotificationCenter.default.addObserver(self, selector: #selector(updateZoomLabel), name: .PDFViewScaleChanged, object: p.pdfView)
         NotificationCenter.default.addObserver(self, selector: #selector(updateZoomLabel), name: NSScrollView.didEndLiveMagnifyNotification, object: p.imageScroll)
         return p
@@ -666,6 +726,7 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
         tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
         tv.textContainer?.widthTracksTextView = true
         sc.hasVerticalScroller = true
+        sc.verticalScroller?.controlSize = .small   // 스크롤바 항상 보이기 설정에서도 얇게
         sc.drawsBackground = false
         sc.automaticallyAdjustsContentInsets = false
         sc.documentView = tv
@@ -695,8 +756,9 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
         editorTabs.set(zip(tabTitles, docs).map { ($0, $1.url.path) }, selected: cur, secondary: other)
     }
 
-    private func updateStatus() {
-        panes.forEach { $0.updateDates() }   // 저장되면 수정 시각도 갱신
+    /// dates: 수정 일시(파일 조회)까지 갱신. 선택 변경·타이핑 중엔 생략 (저장 후에 갱신)
+    private func updateStatus(dates: Bool = true) {
+        if dates { panes.forEach { $0.updateDates() } }
         zoomBox.isHidden = doc?.media == nil
         updateZoomLabel()
         guard let d = doc else { statusLeft.stringValue = ""; statusRight.stringValue = ""; return }
@@ -722,8 +784,9 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
         let r = NSRange(location: min(sr.location, s.length), length: min(sr.length, s.length - min(sr.location, s.length)))
         let line = s.substring(to: r.location).utf16.lazy.filter { $0 == 10 }.count + 1
         let col = r.location - s.lineRange(for: NSRange(location: r.location, length: 0)).location + 1
-        let lines = tv.string.utf16.lazy.filter { $0 == 10 }.count + 1
-        var left = "줄 \(line), 열 \(col)   ·   \(lines)줄   ·   \(tv.string.count)자"
+        if d.stats == nil { d.stats = (tv.string.utf16.lazy.filter { $0 == 10 }.count + 1, tv.string.count) }
+        let (lines, chars) = d.stats!
+        var left = "줄 \(line), 열 \(col)   ·   \(lines)줄   ·   \(chars)자"
         if r.length > 0 { left += "   ·   선택 \(s.substring(with: r).count)자" }
         if let e = d.saveError { left += "   ·   ⚠︎ 저장 실패: \(e)" }
         statusLeft.stringValue = left
@@ -779,11 +842,17 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
         case nil:
             p.attach(d.storage)
             p.textView.typingAttributes = baseAttrs
+            p.textView.markdown = d.syntax.name == "Markdown"
             p.ruler.updateWidth()
             d.syntax.apply(to: d.storage, base: baseAttrs)
             let r = NSRange(location: min(d.sel.location, d.storage.length), length: 0)
             p.textView.setSelectedRange(r)
-            p.textView.scrollRangeToVisible(r)
+            // 맨 앞이면 위 여백(수정 일시 자리)까지 보이게 맨 위로. scrollRangeToVisible 은 여백 일부를 가림
+            // (새로 만든 분할 칸은 크기가 잡힌 뒤에 밀리므로 한 번 더)
+            if r.location == 0 {
+                p.textView.scroll(.zero)
+                DispatchQueue.main.async { [weak p] in if p?.textView.selectedRange().location == 0 { p?.textView.scroll(.zero) } }
+            } else { p.textView.scrollRangeToVisible(r) }
         }
     }
 
@@ -1031,6 +1100,32 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
         if u.isFileURL { open(u, preview: true) } else { NSWorkspace.shared.open(u) }
     }
 
+    /// 미리보기 → 앱: 코드 복사, 체크박스 클릭 시 원문의 [ ] ↔ [x]
+    func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
+        guard let b = m.body as? [String: Any] else { return }
+        if let code = b["copy"] as? String {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(code, forType: .string)
+        }
+        if let line = b["task"] as? Int, let d = panes.first(where: { $0.previewView === m.webView })?.doc { toggleTask(d, line: line) }
+    }
+
+    /// line 번째 줄(0부터)의 첫 체크박스를 뒤집고 바로 저장. 미리보기는 이미 바뀌어 있어 다시 그리지 않음
+    func toggleTask(_ d: Doc, line: Int) {
+        let s = d.storage.string as NSString
+        var loc = 0
+        for _ in 0..<line {
+            guard loc < s.length else { return }
+            loc = NSMaxRange(s.lineRange(for: NSRange(location: loc, length: 0)))
+        }
+        let r = s.range(of: #"\[[ xX]\]"#, options: .regularExpression, range: s.lineRange(for: NSRange(location: min(loc, s.length), length: 0)))
+        guard r.location != NSNotFound else { return }
+        d.storage.replaceCharacters(in: r, with: s.substring(with: r) == "[ ]" ? "[x]" : "[ ]")
+        d.dirty = true
+        d.save()
+        updateStatus()
+    }
+
     var previewText: String { docs[safe: cur]?.preview == true ? Markdown.html(docs[cur].storage.string) : "" }
 
     func closeTabAt(_ i: Int) { if docs.indices.contains(i) { close(i) } }
@@ -1089,6 +1184,7 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
             changeExtension(cur, to: ext)
         }
         s.apply(to: d.storage, base: baseAttrs)
+        for p in panes where p.doc === d { p.textView.markdown = s.name == "Markdown" }
         previewBtn.isHidden = !d.canPreview
         updateStatus()
         persist()
@@ -1357,7 +1453,8 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
 
     func textDidChange(_ n: Notification) {
         doc?.dirty = true
-        updateStatus()
+        doc?.stats = nil
+        updateStatus(dates: false)
         rulers.forEach { $0.updateWidth() }
         saveTimer?.invalidate()
         saveTimer = .scheduledTimer(withTimeInterval: 0.8, repeats: false) { [weak self] _ in
@@ -1367,8 +1464,8 @@ final class MainController: NSObject, NSTextViewDelegate, NSWindowDelegate, WKNa
     }
 
     func textViewDidChangeSelection(_ n: Notification) {
-        updateStatus()
-        for p in panes { p.textView.setNeedsDisplay(p.textView.visibleRect) } // 현재 줄 강조 다시 그림
+        updateStatus(dates: false)
+        (n.object as? EditorView)?.refreshLineHighlight() // 현재 줄 강조 다시 그림
         rulers.forEach { $0.redraw() }
     }
 
